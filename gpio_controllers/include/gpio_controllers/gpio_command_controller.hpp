@@ -69,6 +69,12 @@ protected:
   std::unordered_map<std::string, std::vector<std::string>> interface_names_;
   std::vector<std::string> interface_types_;
 
+  std::unordered_map<std::string, std::vector<std::string>> state_interface_names_;
+  std::vector<std::string> state_interface_types_;
+
+  std::unordered_map<std::string, std::vector<long int>> mask_state_interfaces_;
+
+
   realtime_tools::RealtimeBuffer<std::shared_ptr<CmdType>> rt_command_ptr_;
   rclcpp::Subscription<CmdType>::SharedPtr gpios_command_subscriber_;
 

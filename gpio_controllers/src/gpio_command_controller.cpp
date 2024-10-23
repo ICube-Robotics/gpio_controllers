@@ -44,8 +44,13 @@ CallbackReturn GpioCommandController::on_init()
     auto_declare<std::vector<std::string>>("gpios", std::vector<std::string>());
     gpio_names_ = get_node()->get_parameter("gpios").as_string_array();
     for(std::string &gpio : gpio_names_)
+    {
       auto_declare<std::vector<std::string>>("command_interfaces."
           + gpio, std::vector<std::string>());
+      auto_declare<std::vector<std::string>>("state_interfaces."
+          + gpio, std::vector<std::string>());
+
+    }
   }
   catch (const std::exception & e)
   {
@@ -68,21 +73,65 @@ CallbackReturn GpioCommandController::on_configure(
 
     for(std::string &gpio : gpio_names_){
       auto interfaces = get_node()->get_parameter("command_interfaces." + gpio).as_string_array();
-      if (interfaces.empty()){
-        RCLCPP_ERROR(get_node()->get_logger(),
-            "'command_interfaces.%s' parameter was empty", gpio.c_str());
-        return CallbackReturn::ERROR;
+      if (!interfaces.empty()) {
+        if ( !interface_names_.insert( std::make_pair( gpio, interfaces) ).second ) {
+          RCLCPP_ERROR(get_node()->get_logger(),
+              "Trying to override existing gpio setup. Wrong controller parameters.");
+          return CallbackReturn::ERROR;
+        }
+
+        if ( !state_interface_names_.insert( std::make_pair( gpio, interfaces) ).second ) {
+          RCLCPP_ERROR(get_node()->get_logger(),
+              "Trying to override existing gpio setup. Wrong controller parameters.");
+          return CallbackReturn::ERROR;
+        }
+        RCLCPP_INFO(get_node()->get_logger(), "command_interfaces.%s", gpio.c_str() );
       }
-      if ( !interface_names_.insert( std::make_pair( gpio, interfaces) ).second ) {
-        RCLCPP_ERROR(get_node()->get_logger(),
+    }
+
+    std::vector<std::string> interfaces_;
+
+    for(std::string &gpio : gpio_names_){
+      auto interfaces = get_node()->get_parameter("state_interfaces." + gpio).as_string_array();
+      std::vector<std::string> interfaces_;
+      //auto interfaces_ = interfaces;
+       RCLCPP_INFO(get_node()->get_logger(), "state_interfaces.%s", gpio.c_str() );
+        for (auto state_int_display : interfaces) {
+          std::string name = "state_interfaces." + gpio + "." +state_int_display;
+          RCLCPP_INFO(get_node()->get_logger(),"interface_name %s", name.c_str());
+        }
+
+      if (!interfaces.empty()){
+        for(std::string &state_int : interfaces) {
+
+          auto_declare<std::vector<int>>("mask_interfaces."+ gpio + "." + state_int, std::vector<int>());
+          auto mask_interfaces = get_node()->get_parameter("mask_interfaces." + gpio + "." + state_int).as_integer_array();
+          if (!mask_interfaces.empty()) {
+            if (!mask_state_interfaces_.insert(std::make_pair(state_int,mask_interfaces)).second)
+            {
+              RCLCPP_ERROR(get_node()->get_logger(),
+                "Trying to override existing mask interface setup. Wrong controller parameters.");
+                return CallbackReturn::ERROR;
+            }
+          }
+        }
+        if ( !state_interface_names_.insert( std::make_pair( gpio+"_state", interfaces) ).second ) {
+          RCLCPP_ERROR(get_node()->get_logger(),
             "Trying to override existing gpio setup. Wrong controller parameters.");
-        return CallbackReturn::ERROR;
+          return CallbackReturn::ERROR;
+        }
       }
     }
 
     for(const auto & gpio : gpio_names_){
       for(const auto & interface_name: interface_names_[gpio]){
         interface_types_.push_back(gpio + "/" + interface_name);
+      }
+      for(const auto & state_interface_name: state_interface_names_[gpio]){
+        state_interface_types_.push_back(gpio + "/" + state_interface_name);
+      }
+      for(const auto & state_interface_name: state_interface_names_[gpio+"_state"]){
+        state_interface_types_.push_back(gpio + "/" + state_interface_name);
       }
     }
 
@@ -126,7 +175,7 @@ GpioCommandController::state_interface_configuration() const
 {
   controller_interface::InterfaceConfiguration state_interfaces_config;
   state_interfaces_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
-  state_interfaces_config.names = interface_types_;
+  state_interfaces_config.names = state_interface_types_;
 
   return state_interfaces_config;
 }
@@ -157,9 +206,27 @@ CallbackReturn GpioCommandController::on_activate(
   gpio_state_msg.interface_values.resize(gpio_names_.size());
   for(auto g = 0ul; g < gpio_names_.size(); g++){
     gpio_state_msg.joint_names[g] = gpio_names_[g];
-    for(const auto & interface_name: interface_names_[gpio_names_[g]]){
+    for(const auto & interface_name: state_interface_names_[gpio_names_[g]]){
       gpio_state_msg.interface_values[g].interface_names.push_back(interface_name);
       gpio_state_msg.interface_values[g].values.push_back(std::numeric_limits<double>::quiet_NaN());
+    }
+    for(const auto & interface_name: state_interface_names_[gpio_names_[g]+"_state"]){
+      auto it  = mask_state_interfaces_.find(interface_name);
+      if (it != mask_state_interfaces_.end() ) 
+      {
+        for (auto i = 0ul; i < it->second.size(); i++)
+        {
+          gpio_state_msg.interface_values[g].interface_names.push_back(interface_name + "_" + std::to_string(i));
+          gpio_state_msg.interface_values[g].values.push_back(std::numeric_limits<double>::quiet_NaN());
+        }
+
+      }
+      else 
+      {
+        //RCLCPP_INFO(get_node()->get_logger(), "interface_name:%s", interface_name.c_str() );
+        gpio_state_msg.interface_values[g].interface_names.push_back(interface_name);
+        gpio_state_msg.interface_values[g].values.push_back(std::numeric_limits<double>::quiet_NaN());
+      }
     }
   }
 
@@ -187,12 +254,33 @@ controller_interface::return_type GpioCommandController::update(
     auto & gpio_state_msg = realtime_gpio_state_publisher_->msg_;
 
     gpio_state_msg.header.stamp = get_node()->now();
+    //RCLCPP_INFO(get_node()->get_logger(),"update mesg");
 
     auto sindex = 0ul;
     for(auto g = 0ul; g < gpio_names_.size(); g++){
-      for(auto i = 0ul; i < interface_names_[gpio_names_[g]].size(); i++){
+      for(auto i = 0ul; i < state_interface_names_[gpio_names_[g]].size(); i++){
         gpio_state_msg.interface_values[g].values[i] = state_interfaces_[sindex].get_value();
         sindex ++;
+      }
+      auto offset = 0ul;
+      for(auto i = 0ul; i < state_interface_names_[gpio_names_[g]+"_state"].size(); i++){
+        auto it  = mask_state_interfaces_.find(state_interface_names_[gpio_names_[g]+"_state"][i]);
+        if (it != mask_state_interfaces_.end() ) 
+        {
+          for (auto & mask_state_interface : it->second ) 
+          {
+            gpio_state_msg.interface_values[g].values[i + state_interface_names_[gpio_names_[g]].size()  +offset] = (((int)state_interfaces_[sindex].get_value() & mask_state_interface) == mask_state_interface) ;
+            offset ++;
+
+          }
+        offset --;  
+        sindex ++;
+        }
+        else
+        {
+          gpio_state_msg.interface_values[g].values[i + state_interface_names_[gpio_names_[g]].size() + offset] = state_interfaces_[sindex].get_value();
+          sindex ++;
+        }
       }
     }
 
